@@ -1,16 +1,10 @@
 <?php
-// Встановлюємо часову зону на Київ
-//date_default_timezone_set('Europe/Kyiv');
 $currentDate = date('Y-m-d H:i:s');
 
-// ----------------------------------- ОСНОВНИЙ КОД ------------------------------------------------
-$content = file_get_contents("php://input");
-$update = json_decode($content, true);
-
 $host = 'localhost';
-$db = 'YOUR DB';
-$user = 'USERNAME';
-$pass = 'PASSWORD';
+$db = 'YOUR_DATA';
+$user = 'YOUR_DATA';
+$pass = 'YOUR_DATA';
 $dsn = "mysql:host=$host;dbname=$db;charset=utf8";
 
 try {
@@ -19,31 +13,72 @@ try {
 	die('Підключення до БД не вдалося: '.$e->getMessage());
 }
 
-if (!$update) {
+$content = file_get_contents("php://input");
+$update = json_decode($content, true);
+
+if (!$update || !isset($update['message'])) {
 	exit;
 }
 
-
-define('TELEGRAM_BOT_ID', 'YOUR_BOT_ID');
+define('TELEGRAM_BOT_ID', 'YOUR_DATA');
 define('TELEGRAM_CHAT_ID', $update['message']['chat']['id']);
 define('TELEGRAM_NAME_PM', $update['message']['from']['username']);
 
+define('TRELLO_API_KEY', 'YOUR_DATA');
+define('TRELLO_TOKEN', 'YOUR_DATA');
 
-define('TRELLO_API_KEY', 'YOUR_API_KEY');
-define('TRELLO_TOKEN', 'YOUR_TRELLO_TOKEN');
+$apiKey = TRELLO_API_KEY;
+$token = TRELLO_TOKEN;
 
+$chatId = TELEGRAM_CHAT_ID;
+$username = TELEGRAM_NAME_PM;
 
 $text = $update['message']['text'];
 $length_short = mb_strlen($text, 'UTF-8');
 $message = "";
 
 require 'lib.php';
+
+// Отримання кількості завдань у роботі для кожного користувача
+function getTasksInProgress($pdo) {
+	global $apiKey;
+	$stmt = $pdo->query("SELECT DISTINCT trello_username, trello_token FROM botusers WHERE trello_token IS NOT NULL");
+	$users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+	$message = "<b>Звіт про кількість завдань у роботі:</b>\n\n";
+	foreach ($users as $user) {
+			$trelloToken = $user['trello_token'];
+			$trelloUsername = $user['trello_username'];
+
+			$url = "https://api.trello.com/1/members/$trelloUsername/cards?filter=visible&key=$apiKey&token=$trelloToken";
+
+			$ch = curl_init($url);
+			curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+			$response = curl_exec($ch);
+			curl_close($ch);
+
+			$cards = json_decode($response, true);
+			$tasksInProgress = 0;
+
+			foreach ($cards as $card) {
+					// Замініть ID_СПИСКУ_IN_PROGRESS на реальний ID списку у вашій дошці Trello
+					if ($card['idList'] == 'ID_СПИСКУ_IN_PROGRESS') {  
+							$tasksInProgress++;
+					}
+			}
+
+			$message .= "<b>{$user['trello_username']}:</b> {$tasksInProgress} завдань у роботі\n";
+	}
+
+	return $message;
+}
+
 // -----------------------------------------------------------------------------------
 if (substr($text, 0, 6) == '/start') {
+	//appendToFile("./data.txt", $currentDate." ".TELEGRAM_CHAT_ID);
 	$stmt = $pdo->prepare("INSERT INTO botusers (chat_id, username) VALUES (:chat_id, :username)");
 	$stmt->execute([
-		'chat_id' => "'".TELEGRAM_CHAT_ID."'",
-		'username' => "'".TELEGRAM_NAME_PM."'"
+		'chat_id' => TELEGRAM_CHAT_ID,
+		'username' => TELEGRAM_NAME_PM
 	]);
 	$message = "Привіт <b>".TELEGRAM_NAME_PM."</b> \u{1F91D}\nБудь ласка, надішліть свій email для приєднання Вас до нашої дошки у Trello.\nПеред назвою електронної адреси встановіть <b>/send_email</b> та пробіл";
 
@@ -83,9 +118,8 @@ if (substr($text, 0, 11) == '/send_email') {
 if (substr($text, 0, 10) == '/get_lists') {
 	$apiKey = TRELLO_API_KEY;
 	$token = TRELLO_TOKEN;
-	//$boardId = 'fWKhpvXU';
 
-	$boardId = getBoardIdByName('NAME_YOUR_BOARD');
+	$boardId = getBoardIdByName('NAME_YOUR_TRELLO_BOARD');
 
 	// URL для отримання списків на дошці
 	$url = "https://api.trello.com/1/boards/{$boardId}/lists?key={$apiKey}&token={$token}";
@@ -159,16 +193,58 @@ if (substr($text, 0, 12) == '/close_lists') {
 	}
 }
 // ---------------------------------------
-  if (file_exists('./trello_log.txt')) {
-      $content = file_get_contents('./trello_log.txt');
-      if (!empty($content)) {
-	$message .= "\n\n"."<b>УВАГА!!!\n\nТермінове повідомлення з Trello:</b>\n\n".$content;
-        unlink('./trello_log.txt');
-      }
-  }
-// --------------------------------------------------------------
-if($message != ''){
-   $response = MessageToBot(TELEGRAM_BOT_ID, TELEGRAM_CHAT_ID, $message);
+// Об'єднання користувача через команду /common_user Необхідно вказати /common_user USERNAME_TRELLO;YOUR_TRELLO_TOKEN
+if (substr($text, 0, 12) == '/common_user') {
+	$all_list_name = substr($text, 13, $length_short-13);
+
+	$arr_list_name = explode(";", $all_list_name);
+
+	$trello_username = trim($arr_list_name[0]);
+	$trelloToken =  trim($arr_list_name[1]);
+
+	$stmt = $pdo->prepare("SELECT * FROM botusers WHERE trello_username = :trello_username AND trello_token IS NOT NULL");
+	$stmt->execute([
+		'trello_username' => $trello_username
+	]);
+
+	$user = $stmt->fetch();
+
+	if ($user) {
+		$message = "<b>".TELEGRAM_NAME_PM."</b>, Ви вже об'єднали свій обліковий запис Telegram з Trello.";
+	} else {
+
+		$stmt = $pdo->prepare("UPDATE botusers SET trello_username = :trello_username, trello_token = :trello_token WHERE chat_id = :chat_id");
+
+		$stmt->execute([
+			'trello_username' => $trello_username,
+			'trello_token' => $trelloToken,
+			'chat_id' => TELEGRAM_CHAT_ID
+		]);
+	
+		$message = "<b>".TELEGRAM_NAME_PM."</b>, Ваш обліковий запис Trello успішно об'єднаний з обліковим записом Telegram!";
+	}
 }
-//-------------------------------------------------------------------------------------------
+
+
+// ---------------------------------------
+// Команда для формування звіту /zvit
+if ($text === '/zvit') {
+	$message = getTasksInProgress($pdo); 	
+}
+// ---------------------------------------
+
+// Перевірка наявності термінових повідомлень з Trello
+if (file_exists('./trello_log.txt')) {
+    $content = file_get_contents('./trello_log.txt');
+    if (!empty($content)) {
+				$message .= "\n\n"."<b>УВАГА!!!\n\nТермінове повідомлення з Trello:</b>\n\n".$content;
+        unlink('./trello_log.txt');
+    }
+}
+// ---------------------------------------
+// Відправка повідомлення користувачу
+if($message != ''){
+	$response = MessageToBot(TELEGRAM_BOT_ID, TELEGRAM_CHAT_ID, $message);
+}
+// ---------------------------------------
 ?>
